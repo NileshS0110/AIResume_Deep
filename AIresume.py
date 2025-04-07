@@ -1,79 +1,101 @@
 import streamlit as st
-from deepseek_api import DeepSeekAPI  # Assuming you have a DeepSeek API client
+import requests
 import docx2txt
 import PyPDF2
-import io
 import os
+from dotenv import load_dotenv
+import re
 
-# Set your DeepSeek API key here or load from environment variable
+# Load environment variables
+load_dotenv()
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-deepseek = DeepSeekAPI(api_key=DEEPSEEK_API_KEY)
 
+# DeepSeek API function
+def query_deepseek(prompt: str, model="deepseek-chat"):
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 500,
+        "temperature": 0.7
+    }
+    try:
+        response = requests.post(
+            "https://api.deepseek.com/v1/chat/completions",  # Verify endpoint
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        st.error(f"API Error: {str(e)}")
+        return None
+
+# File text extraction
 def extract_text_from_file(uploaded_file):
-    if uploaded_file.type == "application/pdf":
-        reader = PyPDF2.PdfReader(uploaded_file)
-        text = " ".join(page.extract_text() for page in reader.pages if page.extract_text())
-    elif uploaded_file.type in ["application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/msword"]:
-        text = docx2txt.process(uploaded_file)
-    else:
-        text = uploaded_file.read().decode("utf-8")
-    return text
+    try:
+        if uploaded_file.type == "application/pdf":
+            reader = PyPDF2.PdfReader(uploaded_file)
+            text = " ".join(page.extract_text() for page in reader.pages if page.extract_text())
+        elif uploaded_file.type in ["application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/msword"]:
+            text = docx2txt.process(uploaded_file)
+        else:
+            text = uploaded_file.read().decode("utf-8")
+        return text.strip()
+    except Exception as e:
+        st.error(f"File processing error: {str(e)}")
+        return ""
 
+# Evaluation function
 def evaluate_with_deepseek(resume_text: str, jd_text: str):
     prompt = f"""
-    Job Description:
-    {jd_text}
-
-    Candidate Resume:
-    {resume_text}
-
-    Based on the job description and the candidate's resume, provide:
-    1. A Fit Score out of 100.
-    2. A 3-4 sentence summary highlighting key relevant experience and potential gaps.
-    3. Key skills from the resume that match the job description.
-    4. Potential concerns or missing qualifications.
+    Analyze this resume against the job description and provide:
+    
+    1. Fit Score (0-100) with justification
+    2. Top 3 matching skills
+    3. Top 3 missing qualifications
+    4. Summary (3-4 sentences)
+    
+    ---JOB DESCRIPTION---\n{jd_text}\n---
+    ---RESUME---\n{resume_text}\n---
     """
+    return query_deepseek(prompt)
 
-    response = deepseek.generate(
-        model="deepseek-chat",  # Use the appropriate DeepSeek model
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=400,
-        temperature=0.7
-    )
-    return response.choices[0].message.content.strip()
+# Streamlit UI
+st.set_page_config(page_title="Resume Matcher AI", layout="wide")
+st.title("🚀 Resume Matcher (DeepSeek AI)")
+st.markdown("Upload a resume and job description to evaluate candidate fit.")
 
-st.set_page_config(page_title="RecruitAI Copilot", layout="wide")
-st.title("RecruitAI Copilot – Resume Matcher")
-
-st.markdown("""
-Upload a candidate resume and input a job description to evaluate the fit using AI.
-""")
-
-with st.form("resume_form"):
-    jd_input = st.text_area("Job Description", height=200)
-    uploaded_resume = st.file_uploader("Upload Candidate Resume (PDF, DOCX, TXT)", type=["pdf", "docx", "txt"])
+with st.form("eval_form"):
+    jd = st.text_area("Paste Job Description", height=200)
+    resume_file = st.file_uploader("Upload Resume", type=["pdf", "docx", "txt"])
     submitted = st.form_submit_button("Evaluate")
 
 if submitted:
-    if jd_input and uploaded_resume:
-        resume_text = extract_text_from_file(uploaded_resume)
-        with st.spinner("Analyzing with DeepSeek AI..."):
-            ai_output = evaluate_with_deepseek(resume_text, jd_input)
-
-        st.subheader("AI Evaluation Result")
-        st.success(ai_output)
-        
-        # Add additional visualization
-        st.markdown("### Key Metrics")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("Resume Length", f"{len(resume_text.split())} words")
-        with col2:
-            # Extract score if possible (this is a simple regex approach)
-            import re
-            match = re.search(r"Fit Score: (\d+) out of 100", ai_output)
-            if match:
-                score = int(match.group(1))
-                st.metric("Match Score", f"{score}/100")
+    if jd and resume_file:
+        with st.spinner("Analyzing..."):
+            resume_text = extract_text_from_file(resume_file)
+            if resume_text:
+                result = evaluate_with_deepseek(resume_text, jd)
+                
+                if result:
+                    st.success("Analysis Complete!")
+                    st.subheader("📊 Results")
+                    
+                    # Extract score using regex
+                    score_match = re.search(r"1\. Fit Score: (\d+)", result)
+                    if score_match:
+                        score = int(score_match.group(1))
+                        st.metric("Match Score", f"{score}/100")
+                    
+                    st.markdown(result.replace("1.", "### 1.").replace("2.", "### 2."))
+                    
+                    # Show raw text (debug)
+                    with st.expander("View Extracted Resume Text"):
+                        st.text(resume_text[:2000] + "...")
     else:
-        st.error("Please upload a resume file and enter a job description.")
+        st.error("Please provide both a job description and resume file.")
